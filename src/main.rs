@@ -29,9 +29,153 @@ pub const FONT: [u8; 80] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
+pub const COLOR_ON: [u8; 3] = [255, 255, 255];
+pub const COLOR_OFF: [u8; 3] = [0, 0, 0];
+
+#[derive(Debug)]
+pub struct Display {
+    color_on: [u8; 3],
+    color_off: [u8; 3],
+    hi_mode: bool,
+    lo_res: [u64; 32],
+    hi_res: [u128; 64],
+}
+
+impl Default for Display {
+    fn default() -> Self {
+        Self {
+            color_on: [255, 255, 255],
+            color_off: [0, 0, 0], 
+            hi_mode: false,
+            lo_res: [0; 32],
+            hi_res: [0; 64], 
+        }
+    }
+}
+
+impl std::fmt::Display for Display {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.hi_mode {
+            true => for row in self.hi_res.iter() {
+                writeln!(f, "{row:0128b}")?;
+            }
+            false => for row in self.lo_res.iter() {
+                writeln!(f, "{row:064b}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Display {
+    pub fn draw(&mut self, x: u8, y: usize, sprite: Vec<u8>) -> bool {
+        let mut res = false;
+        if self.hi_mode {
+            for row in 0..sprite.len() {
+                if y + row >= 64 {
+                    break;
+                }
+                let sprite = u128::from_be_bytes([sprite[row], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) >> x;
+                if !res && self.hi_res[y + row] & sprite != 0 {
+                    res = true;
+                }
+                self.hi_res[y + row] ^= sprite;
+            }
+        } else {
+            for row in 0..sprite.len() {
+                if y + row >= 32 {
+                    break;
+                }
+                let sprite = u64::from_be_bytes([sprite[row], 0, 0, 0, 0, 0, 0, 0]) >> x;
+                if !res && self.lo_res[y + row] & sprite != 0 {
+                    res = true;
+                }
+                self.lo_res[y + row] ^= sprite;
+            }
+        }
+        res
+    }
+
+    pub fn render(&self, texture: &mut Texture, canvas: &mut Canvas<Window>) {
+        let (cols, rows) = if self.hi_mode {
+            (128, 64)
+        } else {
+            (64, 32)
+        };
+        let mut data = vec![];
+        let pixel = |row, col| {
+            (if self.hi_mode { self.hi_res[row] } else { self.lo_res[row] as u128 } >> col) & 1 == 1
+        };
+        for row in 0..rows {
+            for col in (0..cols).rev() {
+                if pixel(row, col) {
+                    data.extend_from_slice(&self.color_on);
+                } else {
+                    data.extend_from_slice(&self.color_off);
+                };
+            }
+        }
+        texture.update(None, &data, cols * 3).unwrap();
+        canvas.copy(&texture, None, None).unwrap();
+        canvas.present();
+    }
+
+    pub fn clear(&mut self) {
+        if self.hi_mode {
+            self.hi_res.fill(0);
+        } else {
+            self.lo_res.fill(0);
+        }
+    }
+
+    fn scroll_down(&mut self, rows: usize) {
+        if self.hi_mode {
+            // move down all rows starting from the back
+            for row in (rows..64).rev() {
+                self.hi_res[row] = self.hi_res[row - rows];
+            }
+            // set the remainder to 0
+            for row in 0..rows {
+                self.hi_res[row] = 0;
+            }
+        } else {
+            for row in (rows..32).rev() {
+                self.hi_res[row] = self.hi_res[row - rows];
+            }
+            for row in 0..rows {
+                self.hi_res[row] = 0;
+            }
+        }
+    }
+
+    fn scroll_right(&mut self) {
+        if self.hi_mode {
+            for row in self.hi_res.iter_mut() {
+                *row >>= 4;
+            }
+        } else {
+            for row in self.lo_res.iter_mut() {
+                *row >>= 4;
+            }
+        }
+    }
+
+    fn scroll_left(&mut self) {
+        if self.hi_mode {
+            for row in self.hi_res.iter_mut() {
+                *row <<= 4;
+            }
+        } else {
+            for row in self.lo_res.iter_mut() {
+                *row <<= 4;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Chip8 {
-    display: [u64; 32],
+    display: Display,
     input: Option<u8>,
     memory: Vec<u8>,
     pc: u16,
@@ -104,23 +248,7 @@ impl Chip8 {
     }
 
     pub fn render(&self, texture: &mut Texture, canvas: &mut Canvas<Window>) {
-        let mut data = vec![];
-        for &row in self.display.iter() {
-            for i in (0..64).rev() {
-                if (row >> i) & 1 == 1{
-                    data.push(255);
-                    data.push(255);
-                    data.push(255);
-                } else {
-                    data.push(0);
-                    data.push(0);
-                    data.push(0);
-                }
-            }
-        }
-        texture.update(None, &data, 64 * 3).unwrap();
-        canvas.copy(&texture, None, None).unwrap();
-        canvas.present();
+        self.display.render(texture, canvas);
     }
 
     pub fn get_input(&mut self, event_pump: &mut EventPump) {
@@ -172,12 +300,14 @@ impl Chip8 {
     fn decode(&mut self, instruction: u16) {
         match instruction >> 12 {
             0x0 => match instruction.nnn() {
-                    0x0E0 => { 
-                        for row in self.display.iter_mut() {
-                            *row = 0;
-                        }
-                    },
+                    0x0E0 => self.display.clear(),
                     0x0EE => { self.pc = self.stack.pop().expect("stack is empty") },
+                    // SuperChip instructions
+                    0x0FF => { /*enable 128x64 graphics*/ }
+                    0x0FE => { /*disable 128x64 graphics*/ }
+                    _n @ 0x0C0..=0x0CF => self.display.scroll_down(instruction.n() as usize),
+                    0x0FB => self.display.scroll_right(),
+                    0x0FC => self.display.scroll_left(),
                     _ => { /*Ignore for modern interpreters*/ }
                 }
             0x1 => self.pc = instruction.nnn(),
@@ -253,15 +383,12 @@ impl Chip8 {
                 self.v[0xF] = 0;
                 let x = self.v[instruction.x()] & 63;
                 let y = self.v[instruction.y()] as usize & 31;
+                let mut sprite = vec![];
                 for row in 0..instruction.n() as usize {
-                    if y + row >= 32 {
-                        break;
-                    }
-                    let sprite = u64::from_be_bytes([self.memory[self.i as usize + row], 0, 0, 0, 0, 0, 0, 0]) >> x;
-                    if self.display[y + row] & sprite != 0 {
-                        self.v[0xF] = 1;
-                    }
-                    self.display[y + row] ^= sprite;
+                    sprite.push(self.memory[self.i as usize + row]);
+                }
+                if self.display.draw(x, y, sprite) {
+                    self.v[0xF] = 1;
                 }
             }
             0xE => match instruction.nn() {
@@ -301,6 +428,8 @@ impl Chip8 {
                         self.i = res;
                     }
                     0x29 => self.i = 0x50 + 5 * instruction.x() as u16,
+                    // SuperChip BigHex characters
+                    0x30 => {}
                     0x33 => {
                         let vx = self.v[instruction.x()];
                         let i = self.i as usize;
@@ -318,6 +447,8 @@ impl Chip8 {
                             self.v[n] = self.memory[self.i as usize + n];
                         }
                     }
+                    0x75 => {}
+                    0x85 => {}
                     _ => println!("Invalid instruction: {instruction:#06x}"),
                 }
             _ => { /*categorically impossible*/ }

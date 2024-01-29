@@ -6,8 +6,6 @@ pub const COLOR_OFF: [u8; 3] = [0, 0, 0];
 #[derive(Debug)]
 pub struct Display {
     changed: bool,
-    //color_on: [u8; 3],
-    //color_off: [u8; 3],
     hi_mode: bool,
     lo_res: [u64; 32],
     hi_res: [u128; 64],
@@ -17,8 +15,6 @@ impl Default for Display {
     fn default() -> Self {
         Self {
             changed: false,
-            //color_on: [255, 255, 255],
-            //color_off: [0, 0, 0], 
             hi_mode: false,
             lo_res: [0; 32],
             hi_res: [0; 64], 
@@ -41,31 +37,27 @@ impl std::fmt::Display for Display {
 }
 
 impl Display {
+    pub fn set_mode(&mut self, hi_res_mode: bool) {
+        self.hi_mode = hi_res_mode;
+    }
+    
     pub fn draw(&mut self, x: u8, y: usize, sprite: Vec<u8>) -> bool {
         self.changed = true;
         let mut res = false;
-        if self.hi_mode {
-            for row in 0..sprite.len() {
-                if y + row >= 64 {
-                    break;
-                }
-                let sprite = (sprite[row] as u128) << (120 - x);
-                if !res && self.hi_res[y + row] & sprite != 0 {
-                    res = true;
-                }
-                self.hi_res[y + row] ^= sprite;
-            }
+        let (rows, columns, T) = if self.hi_mode {
+            (64, 120, u128)
         } else {
-            for row in 0..sprite.len() {
-                if y + row >= 32 {
-                    break;
-                }
-                let sprite = (sprite[row] as u64) << (56 - x);
-                if !res && self.lo_res[y + row] & sprite != 0 {
-                    res = true;
-                }
-                self.lo_res[y + row] ^= sprite;
+            (32, 56, u64)
+        };
+        for row in 0..sprite.len() {
+            if y + row >= rows {
+                break;
             }
+            let sprite = (sprite[row] as T) << (columns - x);
+            if !res && self.hi_res[y + row] & sprite != 0 {
+                res = true;
+            }
+            self.hi_res[y + row] ^= sprite;
         }
         res
     }

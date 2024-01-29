@@ -6,12 +6,14 @@ use std::time::Duration;
 use display::Display;
 use rand::Rng;
 use sdl2::EventPump;
+use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice, AudioStatus};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::render::{Texture, Canvas};
 use sdl2::video::Window;
 use sdl2::pixels::PixelFormatEnum;
 
+pub mod args;
 pub mod display;
 
 pub const FONT: [u8; 80] = [
@@ -46,20 +48,11 @@ pub struct Chip8 {
     st: u8,
 }
 
-pub trait Nibbles {
-    /// Returns the second-most significant 4 bits (0000_XXXX_0000_0000)
+trait Nibbles {
     fn x(&self) -> usize;
-    
-    /// Returns the second-least significant 4 bits (0000_0000_XXXX_0000)
     fn y(&self) -> usize;
-
-    /// Returns the least significant 4 bits (0000_0000_0000_XXXX)
     fn n(&self) -> u8;
-
-    /// Returns the lower byte
     fn nn(&self) -> u8;
-
-    /// Returns the lowest 12 bits
     fn nnn(&self) -> u16;
 }
 
@@ -110,6 +103,14 @@ impl Chip8 {
     pub fn render(&mut self, texture: &mut Texture, canvas: &mut Canvas<Window>) {
         if self.display.changed() {
             self.display.render(texture, canvas);
+        }
+    }
+
+    pub fn beep(&mut self, audio_device: &AudioDevice<SquareWave>) {
+        match (self.st > 0, audio_device.status()) {
+            (true, AudioStatus::Paused) => audio_device.resume(),
+            (false, AudioStatus::Playing) => audio_device.pause(),
+            _ => {/*Do nothing*/}
         }
     }
 
@@ -318,6 +319,27 @@ impl Chip8 {
     }
 }
 
+pub struct SquareWave {
+    phase_inc: f32,
+    phase: f32,
+    volume: f32,
+}
+
+impl AudioCallback for SquareWave {
+    type Channel = f32;
+
+    fn callback(&mut self, out: &mut [Self::Channel]) {
+        for x in out.iter_mut() {
+            *x = if self.phase <= 0.5 {
+                self.volume
+            } else {
+                -self.volume
+            };
+            self.phase = (self.phase + self.phase_inc) % 1.0;
+        }
+    }
+}
+
 fn main() {
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
@@ -332,18 +354,37 @@ fn main() {
         .present_vsync()
         .build()
         .unwrap();
+    
     let mut event_pump = sdl_context.event_pump().unwrap();
     canvas.set_scale(8.0, 8.0).unwrap();
 
     let creator = canvas.texture_creator();
     let mut texture = creator.create_texture_target(PixelFormatEnum::RGB24, 64, 32).unwrap();
-    let mut chip_8 = Chip8::new("test_opcode.ch8");
+
+    let audio_subsystem = sdl_context.audio().unwrap();
+    let desired_spec = AudioSpecDesired {
+        freq: Some(44100),
+        channels: Some(1),
+        samples: None,
+    };
+
+    let audio_device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
+        SquareWave {
+            phase_inc: 440.0 / spec.freq as f32,
+            phase: 0.0,
+            volume: 0.25,
+        }
+    }).unwrap();
+
+    let mut chip_8 = Chip8::new("chip8-test-rom-with-audio.ch8");
     let mut start = std::time::Instant::now();
     let mut cycles = 0;
+
     loop {
         cycles += 1;
         chip_8.tick();
         chip_8.render(&mut texture, &mut canvas);
+        chip_8.beep(&audio_device);
         chip_8.get_input(&mut event_pump);
         if start.elapsed() >= Duration::new(1, 0) {
             start = std::time::Instant::now();
